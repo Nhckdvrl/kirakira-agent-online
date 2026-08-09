@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kirakira-agent-online"
+version = "0.1.0"
+description = "A durable multi-user Cloud Agent application runtime."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.16,<2",
+    "argon2-cffi>=23.1,<26",
+    "fastapi>=0.116,<1",
+    "httpx[socks]>=0.28.0",
+    "html2text>=2025.4.0",
+    "jieba>=0.42",  # akasha RAR 引擎的中文分词
+    "json-repair>=0.44.1",
+    "lxml>=6.0.0",
+    "Pillow>=11.0.0",
+    "prometheus-client>=0.22,<1",
+    "psycopg[binary,pool]>=3.2,<4",
+    "numpy>=1.26",
+    "PyYAML>=6.0",
+    "SQLAlchemy[asyncio]>=2.0,<3",
+    "websockets>=15,<17",
+    "uvicorn[standard]>=0.35,<1",
+]
+keywords = ["agent", "cloud", "multi-user", "tool-calling"]
+
+[project.scripts]
+kirakira-cloud-api = "cloud.main:main"
+kirakira-cloud-worker = "cloud.worker_main:main"
+
+[dependency-groups]
+dev = [
+    "APScheduler>=3.11,<4",
+    "aiosqlite>=0.21,<1",
+    "click>=8.1,<9",
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.23,<2",
+    "python-telegram-bot>=22.7",
+    "sqlite-vec>=0.1.6",
+    "telegramify-markdown>=0.5",
+    "textual>=6.12,<9",
+    "yoyo-migrations==9.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = [
+    "agent*",
+    "bus*",
+    "core*",
+    "cloud*",
+    "infra*",
+    "memory2*",
+    "plugins*",
+    "proactive_v2*",
+    "session*",
+    "utils*",
+]
+exclude = ["agent.migrations*", "infra.channels*"]
+
+[tool.setuptools.package-data]
+"cloud" = ["migrations/script.py.mako"]
+"plugins.drift_flow" = ["builtin_skills/*/SKILL.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

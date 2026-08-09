@@ -1,0 +1,1 @@
+"""Canonical persistent-session package."""

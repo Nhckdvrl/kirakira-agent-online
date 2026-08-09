@@ -1,0 +1,54 @@
+# Local secrets and config — copy the .example files and edit those.
+# The *.before-setup.bak backups the setup wizard writes hold the same secrets.
+.env
+config.toml
+!plugins/**/config.toml
+.env.*.bak
+config.toml.*.bak
+
+# Reference checkout used only for auditing; not part of this project.
+Reference/
+
+# Runtime workspace state. All of this is created by the agent at run time
+# under the workspace root (see [runtime].workspace in config.example.toml).
+# None of it belongs in the repository.
+/sessions/
+/memory/
+/uploads/
+/workspace/
+/mcp/
+/.kirakira/
+/proactive/
+/proactive.db
+/proactive.db-shm
+/proactive.db-wal
+/drift/
+/observe/
+/PROACTIVE_CONTEXT.md
+/coremem.db
+/coremem.db-shm
+/coremem.db-wal
+/sessions.db
+/sessions.db-shm
+/sessions.db-wal
+
+# Supervisor / boot handshake state, written next to the workspace root.
+/.runtime-ready.json
+/.supervisor.lock
+/.supervisor.pid
+/.instance.lock
+/migrations.sqlite3
+/migrations.sqlite3-shm
+/migrations.sqlite3-wal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Editor / OS
+.DS_Store
+.transcripts/

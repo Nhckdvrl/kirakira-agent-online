@@ -1,0 +1,102 @@
+[runtime]
+# 运行时可写状态的根目录：session、记忆、附件、插件数据、workspace MCP 都在这里。
+# 优先级：--workspace > KIRAKIRA_WORKSPACE > 本项 > 当前目录。~ 会在启动时展开。
+workspace = "."
+
+[llm.main]
+model = "deepseek-v4-flash"
+api_key = "${DEEPSEEK_API_KEY}"
+base_url = "https://api.deepseek.com/v1"
+enable_thinking = false
+# 模型真实上下文容量。memory_window 与 max_tokens 未显式配置时按它等比例派生。
+context_window = 128000
+
+[agent]
+max_iterations = 40
+system_prompt = "你是 Kirakira。使用与用户相同的语言回答；执行前核实，完成后给出可验证结果。"
+
+# 可选：显式覆盖派生值。留空则由 context_window 决定。
+# [agent.context]
+# effective_context_percent = 0.9
+# memory_window = 40
+# 超限时会依次移除 skills catalog、recent context、长期记忆、检索记忆，最后缩短历史；
+# 每次尝试的 section/token 明细会写进 session 消息的 context_trace。
+
+[memory]
+enabled = true
+# auto 读取 memory/structured-owner.json；迁移成功后使用 memory2，回滚后使用 legacy。
+engine = "auto"
+
+# 可选：配置后启用语义+词法混合记忆检索；不配置则使用纯词法检索。
+[memory.embedding]
+model = ""
+api_key = ""
+base_url = ""
+# 必须与 provider 返回维度一致；为空时 M1 保留无向量数据，M2 再执行 backfill。
+output_dimensionality = 1024  # Cloud pgvector contract; provider output must match
+
+[channels.chat]
+enabled = true
+host = "127.0.0.1"
+port = 6322
+channel_name = "web"
+
+[channels.telegram]
+token = ""
+allow_from = []
+channel_name = "telegram"
+
+[channels.qq]
+enabled = false
+bot_uin = ""
+api_base_url = "http://127.0.0.1:3000"
+access_token = ""
+allow_from = []
+require_at = true
+channel_name = "qq"
+
+# 腾讯开放平台官方 QQBot（C2C WebSocket），与上面的 NapCat/OneBot QQ 并存。
+[channels.qqbot]
+enabled = false
+app_id = ""
+client_secret = ""
+allow_from = []
+channel_name = "qqbot"
+api_base_url = "https://api.sgroup.qq.com"
+
+# [[channels.qq.groups]]
+# group_id = "123456789"
+
+# =============================================================================
+# 主动推送（Proactive）与 Drift 空闲任务 —— 与被动回复并列的两条差异化链路
+# =============================================================================
+[proactive]
+# 开启后 agent 会按电量模型自适应轮询数据源，主动向你推送消息。
+# 需要先填好 [proactive.target] 再设为 true。
+enabled = false
+# base_score 高（长期沉默或近期语境丰富）用短间隔，否则用长间隔；单位秒。
+tick_interval_s1 = 2400
+tick_interval_s0 = 4800
+tick_jitter = 0.3
+max_tokens = 1024
+# 留空则复用 [llm.main].model
+model = ""
+
+[proactive.target]
+# 推送目标渠道与会话 id（例如 telegram 的 user id）。
+channel = ""
+chat_id = ""
+
+[proactive.agent]
+# content 通道单轮最多评估的候选条数。
+content_limit = 5
+# 距上次推送不足该小时数时，抑制 content 刷屏（alert 不受限）。
+delivery_cooldown_hours = 1
+content_max_age_days = 14   # 未读 content 超过该龄期(天)淘汰,防止无界堆积
+
+[proactive.drift]
+# Drift：主动链路本轮未产生推送时，agent 照 drift/skills/*/SKILL.md 自主干后台活儿。
+# 建议先跑通 proactive 再开启。
+enabled = false
+min_interval_hours = 3
+max_steps = 20
