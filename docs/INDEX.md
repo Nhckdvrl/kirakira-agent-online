@@ -1,5 +1,7 @@
 # 文档索引
 
+更新日期：2026-08-12。
+
 Kirakira 的正式产品形态是多用户 Cloud Agent。文档只保留四个主要入口：
 
 | 文档 | 内容 |
@@ -16,5 +18,6 @@ Kirakira 的正式产品形态是多用户 Cloud Agent。文档只保留四个�
 - [插件架构](./architecture/plugins.md)
 - [快照与租约](./architecture/snapshot-leases.md)
 
-`handbook/`、旧控制面和本地 workspace 文档属于算法回归实现的历史资料，不是 Cloud 产品启动说明。
-公开部署和 API 使用以根目录 README 与上述四个入口为准。
+其余 `architecture/`、`decisions/`、`handbook/` 与 `operations/` 文件是算法/设计参考，不是并列的产品
+入口；旧控制面和本地 workspace 内容只解释仍被回归测试覆盖的底层算法。公开部署与 API 使用以根目录
+README 和上表四个入口为准。

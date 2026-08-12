@@ -462,7 +462,14 @@ def initialize_workspace(
     else:
         existed = config_path.exists()
         content = template.read_text(encoding="utf-8")
-        content = content.replace('workspace = "."', f"workspace = {_toml_string(str(workspace))}", 1)
+        workspace_line = f"workspace = {_toml_string(str(workspace))}"
+        if "[runtime]" in content:
+            content = content.replace('workspace = "."', workspace_line, 1)
+        else:
+            # The public template is Cloud-only. This unpublished legacy adapter
+            # still injects its local workspace so its algorithm regression
+            # fixture remains self-contained.
+            content = f"[runtime]\n{workspace_line}\n\n{content}"
         _atomic_write(config_path, content, mode=0o600)
         (summary.overwritten if existed else summary.created).append(config_path)
 

@@ -2,13 +2,14 @@
 
 评审日期：2026-08-08。
 
-最后实施更新：2026-08-09。本文件同时保存方案评审、原始完整方案与当前实施记录；不再维护平行的
+最后实施更新：2026-08-12。本文件同时保存方案评审、原始完整方案与当前实施记录；不再维护平行的
 “实施记录”文档。
 
 ## 结论
 
-原方案的后端主线成立，但产品目标调整为 **Cloud-only**。同一个 Agent core 暂时保留 Local adapter 仅用于开发、测试和迁移，不再把 Local 作为长期用户产品。Cloud 使用
-PostgreSQL 保存 durable state，Redis 负责协调与实时路径；HTTP 请求只创建 Run，worker
+原方案的后端主线成立，但产品目标调整为 **Cloud-only**。同一个 Agent core 中少量旧 adapter 只作为
+算法与合同回归夹具，不再构成可安装、可启动的 Local 产品。Cloud 使用 PostgreSQL 保存 durable state；
+V1 直接以 PostgreSQL lease/轮询协调，未来达到实测瓶颈后才引入 Redis wake-up。HTTP 请求只创建 Run，worker
 异步执行；同 conversation 串行、跨 conversation 并行；会执行代码的工具进入 sandbox。
 
 不建议一次性实施全部方案。工程顺序应是：先建立 turn/持久化 ports，并用现有 Local 路径作回归夹具，再做
@@ -39,10 +40,11 @@ Cloud 主链已经承重，不再是最小纵向切片：
 
 截至本次更新：快速全量回归 `634 passed, 1 skipped, 22 warnings, 4 subtests passed`；Neon 临时分支上的真实
 PostgreSQL 测试已验证 12 worker 单 owner claim、30 并发请求精确限流、20 条同会话并发序号、
-1024 维 pgvector 写入和余弦查询。主分支 migration 尚待最终人工确认。
+1024 维 pgvector 写入和余弦查询。2026-08-12 同一 migration 已提交 Neon main，主库
+`alembic_version = 20260809_13`，临时分支已清理。
 
 仍需在发布环境完成的不是代码降级项，而是外部部署依赖：提供真实 isolated sandbox 服务、填写模型与
-embedding credential、执行主库 migration、安装 API/worker systemd unit，并在目标机器做容量压测。
+embedding credential、安装 API/worker systemd unit，并在目标机器做容量压测。
 
 ## 已确认，可直接实施
 
@@ -74,30 +76,21 @@ embedding credential、执行主库 migration、安装 API/worker systemd unit�
 5. 1000 个在线用户不是 1000 个同时执行的 Agent。容量目标必须用提交吞吐、平均 run 时长、
    worker 并发、queue wait 和 SSE 连接数分别描述。
 
-## 仍需产品确认（进入对应阶段前确认）
+## 仍需产品确认（不阻塞当前 Cloud 后端）
 
-### P0：做 Cloud 数据模型前必须确认
+以下问题影响商业化或后续产品范围，但不再阻塞已经完成的 Cloud runtime：
 
-- **首要使用场景**：通用个人 Agent、代码 Agent，还是“个人 Agent + 文件/代码执行”二者兼有？
-  这会决定 sandbox 是否为 V1 核心，而不是后期增强。
 - **模型费用模式**：用户 BYOK、平台统一付费，还是同时支持？这决定 credential、usage ledger、
   quota、账单和滥用防护的优先级。
-- **账号范围**：V1 是否只做个人账号？原方案暂定没有 Organization/Team/RBAC，需产品确认后冻结。
 - **数据保留与删除**：conversation/message/run/checkpoint/tool result 默认保留多久；用户删除是软删、
   延迟物理删还是立即物理删。
-
-### P1：做 Memory/File 前确认
-
-- Memory 默认是否 user-global；是否允许 conversation-only 或显式关闭记忆。
 - 用户文件是 conversation 级还是 user-global；artifact 和原始上传的保留期是否不同。
 - Cloud 是否允许用户提交本地目录，或第一版只允许浏览器上传 / Git 仓库拉取。
-
-### P2：做集成与后台任务前确认
-
 - Remote MCP 的租户授权、域名 allowlist 与 credential 归属。
-- Scheduler、Telegram、Proactive、Drift 哪些真正属于 Cloud 产品体验；原方案暂定仅 Scheduler/Telegram
-  后置，Proactive/Drift 不进 Cloud V1。
 - 外部副作用工具的确认 UI、审批超时与恢复语义。
+
+已经由实现冻结的决定：V1 是个人账号；Memory 是 user-scoped；文件/代码工具必须进入 remote sandbox；
+Proactive 与 Drift 属于 Cloud 后台能力；Telegram/QQ 和本地 channel 不属于当前产品入口。
 
 
 ## Local mode 去留决定
@@ -105,9 +98,11 @@ embedding credential、执行主库 migration、安装 API/worker systemd unit�
 ### 决定
 
 - **去除 Local 的产品定位**：README、路线图和新功能不再以本地 TUI/自带 API key 运行作为最终交付目标。
-- **最终仓库是纯在线版**：最终部署和公开入口只包含 Cloud API、worker、scheduler、PostgreSQL/Redis adapter、对象存储和 sandbox；不提供 Local mode。
+- **最终发布包是纯在线版**：部署和公开入口只包含 Cloud API、worker、scheduler、PostgreSQL adapter
+  和 sandbox；不提供 Local mode。Redis/对象存储只在真实负载或文件产品需求出现后引入。
 - **迁移期暂不物理删除 Local adapter**：SQLite SessionManager、MessageBus、本机 Shell 和最小调试入口只承担开发、回归和 Cloud adapter 的对照实现。
-- **Cloud 纵向切片承重后全部删除**：当 PostgreSQL conversation/run store、API/worker 与 sandbox execution 分别通过合同测试后，逐项删除被替代实现，而不是长期维护双模式。
+- **Cloud 纵向切片承重后退出发布包**：被替代实现不安装命令、不进入 production wheel；仍被原算法
+  回归依赖的源码可暂留仓库，等测试迁到专用 fake 后再物理删除，避免用“删文件”换取虚假的迁移完成度。
 
 ### 为什么不现在删除
 
@@ -137,9 +132,9 @@ embedding credential、执行主库 migration、安装 API/worker systemd unit�
 专用于单元测试的 fake/in-memory store、fake model 和 mock execution backend；它们不是可部署的
 Local 产品，也不应带 TUI、workspace 配置或本机 shell 能力。
 
-## 推荐下一纵向切片
+## 纵向切片完成情况
 
-在上述 P0 产品选择确认后，实现最小 Cloud slice：
+最小 Cloud slice 已经完成并扩展到 production worker：
 
 ```text
 opaque auth session
@@ -151,8 +146,9 @@ opaque auth session
   → GET run/messages
 ```
 
-这一切片先不用 Redis，也不执行 host shell。它先证明多用户隔离、会话不串、durable Run 和 Agent
-core 复用；之后再拆 API/worker 并加入 Redis wakeup/SSE。
+当前仍不依赖 Redis，也不执行 host shell。多用户隔离、会话串行、durable Run、API/worker 分离与 SSE
+都已有合同测试；后续只有在 PostgreSQL polling 的实测容量成为瓶颈时才增加 Redis wake-up，不改变
+PostgreSQL durable truth。
 
 ---
 
