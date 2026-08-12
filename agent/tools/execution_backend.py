@@ -72,6 +72,7 @@ class WorkspaceBackend(Protocol):
         self, owner: str, path: str, old_text: str, new_text: str, replace_all: bool
     ) -> str: ...
     async def read_binary(self, owner: str, path: str) -> bytes: ...
+    async def write_binary(self, owner: str, path: str, content: bytes) -> str: ...
 
 
 class LocalExecutionBackend:
@@ -276,6 +277,16 @@ class RemoteSandboxExecutionBackend:
         )
         response.raise_for_status()
         return base64.b64decode(str(response.json().get("content_base64") or ""))
+
+    async def write_binary(self, owner: str, path: str, content: bytes) -> str:
+        return await self._workspace_result(
+            "/v1/workspace/write-binary",
+            {
+                "owner": owner,
+                "path": path,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+        )
 
     async def _result_request(self, path: str, payload: dict[str, object]) -> ExecutionResult:
         response = await self._client.post(path, json=payload)

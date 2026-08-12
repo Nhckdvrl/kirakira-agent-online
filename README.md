@@ -26,8 +26,14 @@ remote sandbox.
   events; Drift runs when the proactive path has nothing to deliver. The user
   selects one active Agent conversation as the delivery target; workers trigger
   both paths automatically.
-- Remote sandbox attestation, tool checkpoints, deterministic automation delivery
-  keys, Prometheus metrics, JSON logs, readiness checks and hardened systemd units.
+- Durable at/after/every/cron scheduling, uploads/downloads, multimodal attachments,
+  and a complete same-origin browser application.
+- Telegram, OneBot QQ and Tencent QQBot pairing, deduplicated inbound delivery,
+  durable outbox delivery and proactive messages.
+- Per-user remote MCP, Cloud Plugins, Skills and durable subagents, all bound to a
+  per-turn snapshot lease.
+- A Bubblewrap sandbox for shell, PTY and file isolation, tool checkpoints,
+  Prometheus metrics, JSON logs, readiness checks and hardened systemd units.
 
 Local TUI/setup/bootstrap is not a product mode and is not installed as a public
 command. Some legacy adapters remain in the source tree solely as algorithm and
@@ -35,17 +41,18 @@ contract regression fixtures.
 
 ## Run the service
 
-Requirements: Python 3.11+, PostgreSQL with pgvector, an OpenAI-compatible chat
-and embedding endpoint, and an independently isolated sandbox service implementing
-the contract in `agent/tools/execution_backend.py`.
+Requirements: Python 3.11+, Bubblewrap, PostgreSQL with pgvector, and an
+OpenAI-compatible chat and embedding endpoint.
 
 ```bash
 cp .env.example .env
 cp config.example.toml config.toml
 uv sync --group dev
 uv run alembic upgrade head
+uv run kirakira-sandbox
 uv run kirakira-cloud-api
 uv run kirakira-cloud-worker
+uv run kirakira-channel-gateway  # when external channels are enabled
 ```
 
 For production, install multiple worker instances with the units in
@@ -62,6 +69,13 @@ GET    /v1/conversations/{id}/messages
 POST   /v1/conversations/{id}/messages
 PUT    /v1/conversations/{id}/automation
 POST   /v1/conversations/{id}/proactive-events
+GET    /v1/schedules | POST /v1/conversations/{id}/schedules
+POST   /v1/conversations/{id}/files
+POST   /v1/channel-pairings | GET /v1/channel-links
+GET    /v1/mcp-servers | POST /v1/mcp-servers
+GET    /v1/plugins | POST /v1/plugins
+GET    /v1/skills | POST /v1/skills
+GET    /v1/subagents
 GET    /v1/runs/{id}
 POST   /v1/runs/{id}/cancel
 GET    /v1/runs/{id}/events/stream
@@ -89,13 +103,14 @@ architecture, trade-offs and remaining deployment decisions.
 ## Repository map
 
 ```text
-cloud/            API, durable stores, Run/automation workers, observability
+cloud/            API, UI, stores, workers, channels, MCP/plugins, scheduler, subagents
+sandbox_service/  Bubblewrap isolated execution service
 agent/            ReAct, context, tools, MCP and execution contracts
 core/             memory and shared runtime contracts
 memory2/          canonical structured-memory algorithms
 plugins/          Memory, Proactive and Drift implementations
 proactive_v2/     proactive frame and orchestration
-deploy/systemd/   production process units
+deploy/systemd/   API, worker, sandbox and channel-gateway units
 tests/            unit, contract, concurrency and opt-in PostgreSQL tests
 ```
 

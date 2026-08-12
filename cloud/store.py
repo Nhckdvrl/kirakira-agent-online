@@ -37,6 +37,17 @@ from cloud.models import (
     ProactiveSourceFeedback,
     ProactiveTick,
     ProactiveTickStep,
+    ScheduledJob,
+    UserFile,
+    ChannelPairing,
+    ChannelLink,
+    ChannelInboundEvent,
+    ChannelDelivery,
+    CloudMcpServer,
+    CloudPlugin,
+    CloudPluginTask,
+    CloudSubagentJob,
+    CloudSkill,
     utc_now,
 )
 from cloud.security import hash_password, hash_session_token, verify_password
@@ -69,6 +80,1091 @@ class CloudStore:
     async def ping(self) -> None:
         async with self._sessions() as session:
             await session.execute(select(1))
+
+    async def create_user_file(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        *,
+        workspace_path: str,
+        filename: str,
+        content_type: str,
+        size_bytes: int,
+        sha256_hex: str,
+    ) -> UserFile:
+        async with self._sessions.begin() as session:
+            exists_conversation = await session.scalar(
+                select(Conversation.id).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id,
+                )
+            )
+            if exists_conversation is None:
+                raise StoreNotFoundError("conversation not found")
+            item = UserFile(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                workspace_path=workspace_path,
+                filename=filename,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                sha256=sha256_hex,
+            )
+            session.add(item)
+            await session.flush()
+            return item
+
+    async def get_user_file(self, user_id: UUID, file_id: UUID) -> UserFile:
+        async with self._sessions() as session:
+            item = await session.scalar(
+                select(UserFile).where(UserFile.id == file_id, UserFile.user_id == user_id)
+            )
+        if item is None:
+            raise StoreNotFoundError("file not found")
+        return item
+
+    async def create_channel_pairing(
+        self, user_id: UUID, conversation_id: UUID, provider: str, raw_code: str
+    ) -> ChannelPairing:
+        if provider not in {"telegram", "qq", "qqbot"}:
+            raise ValueError("unsupported channel provider")
+        code_hash = hashlib.sha256(raw_code.encode()).hexdigest()
+        async with self._sessions.begin() as session:
+            conversation = await session.scalar(
+                select(Conversation.id).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id,
+                )
+            )
+            if conversation is None:
+                raise StoreNotFoundError("conversation not found")
+            pairing = ChannelPairing(
+                code_hash=code_hash,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                provider=provider,
+                expires_at=utc_now() + timedelta(minutes=10),
+            )
+            session.add(pairing)
+            return pairing
+
+    async def consume_channel_pairing(
+        self,
+        raw_code: str,
+        *,
+        provider: str,
+        external_user_id: str,
+        external_chat_id: str,
+        display_name: str = "",
+    ) -> ChannelLink:
+        code_hash = hashlib.sha256(raw_code.encode()).hexdigest()
+        async with self._sessions.begin() as session:
+            pairing = await session.scalar(
+                select(ChannelPairing)
+                .where(ChannelPairing.code_hash == code_hash)
+                .with_for_update()
+            )
+            pairing_expiry = pairing.expires_at if pairing is not None else None
+            if pairing_expiry is not None and pairing_expiry.tzinfo is None:
+                pairing_expiry = pairing_expiry.replace(tzinfo=UTC)
+            if (
+                pairing is None
+                or pairing.provider != provider
+                or pairing.consumed_at is not None
+                or pairing_expiry is None
+                or pairing_expiry < utc_now()
+            ):
+                raise StoreStateError("invalid or expired pairing code")
+            occupied = await session.scalar(
+                select(ChannelLink).where(
+                    ChannelLink.provider == provider,
+                    ChannelLink.external_chat_id == external_chat_id,
+                )
+            )
+            if occupied is not None:
+                raise StoreConflictError("channel chat is already linked")
+            link = ChannelLink(
+                user_id=pairing.user_id,
+                conversation_id=pairing.conversation_id,
+                provider=provider,
+                external_user_id=external_user_id[:300],
+                external_chat_id=external_chat_id[:300],
+                display_name=display_name[:300],
+            )
+            pairing.consumed_at = utc_now()
+            session.add(link)
+            await session.flush()
+            return link
+
+    async def list_channel_links(self, user_id: UUID) -> list[ChannelLink]:
+        async with self._sessions() as session:
+            return list(
+                await session.scalars(
+                    select(ChannelLink)
+                    .where(ChannelLink.user_id == user_id, ChannelLink.enabled.is_(True))
+                    .order_by(ChannelLink.created_at)
+                )
+            )
+
+    async def resolve_channel_link(
+        self, provider: str, external_chat_id: str
+    ) -> ChannelLink:
+        async with self._sessions() as session:
+            link = await session.scalar(
+                select(ChannelLink).where(
+                    ChannelLink.provider == provider,
+                    ChannelLink.external_chat_id == external_chat_id,
+                    ChannelLink.enabled.is_(True),
+                )
+            )
+        if link is None:
+            raise StoreNotFoundError("channel chat is not linked")
+        return link
+
+    async def create_mcp_server(
+        self,
+        user_id: UUID,
+        *,
+        name: str,
+        base_url: str,
+        encrypted_headers: str,
+    ) -> CloudMcpServer:
+        item = CloudMcpServer(
+            user_id=user_id,
+            name=name,
+            base_url=base_url,
+            encrypted_headers=encrypted_headers,
+        )
+        try:
+            async with self._sessions.begin() as session:
+                session.add(item)
+                await session.flush()
+                return item
+        except IntegrityError as exc:
+            raise StoreConflictError("MCP server name already exists") from exc
+
+    async def list_mcp_servers(
+        self, user_id: UUID, *, enabled_only: bool = False
+    ) -> list[CloudMcpServer]:
+        async with self._sessions() as session:
+            query = select(CloudMcpServer).where(CloudMcpServer.user_id == user_id)
+            if enabled_only:
+                query = query.where(CloudMcpServer.enabled.is_(True))
+            return list(await session.scalars(query.order_by(CloudMcpServer.name)))
+
+    async def delete_mcp_server(self, user_id: UUID, server_id: UUID) -> None:
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudMcpServer).where(
+                    CloudMcpServer.id == server_id,
+                    CloudMcpServer.user_id == user_id,
+                )
+            )
+            if item is None:
+                raise StoreNotFoundError("MCP server not found")
+            await session.delete(item)
+
+    async def create_plugin(
+        self,
+        user_id: UUID,
+        *,
+        name: str,
+        base_url: str,
+        encrypted_headers: str,
+        manifest: dict,
+    ) -> CloudPlugin:
+        item = CloudPlugin(
+            user_id=user_id,
+            name=name,
+            base_url=base_url,
+            encrypted_headers=encrypted_headers,
+            manifest=dict(manifest),
+        )
+        try:
+            async with self._sessions.begin() as session:
+                session.add(item)
+                await session.flush()
+                for kind, key in (("job", "jobs"), ("source", "sources")):
+                    for spec in manifest.get(key, []):
+                        session.add(
+                            CloudPluginTask(
+                                plugin_id=item.id,
+                                user_id=user_id,
+                                task_id=str(spec["id"]),
+                                kind=kind,
+                                interval_seconds=int(spec["interval_seconds"]),
+                                next_run_at=utc_now(),
+                            )
+                        )
+                await session.flush()
+                return item
+        except IntegrityError as exc:
+            raise StoreConflictError("plugin name or task id already exists") from exc
+
+    async def list_plugins(
+        self, user_id: UUID, *, enabled_only: bool = False
+    ) -> list[CloudPlugin]:
+        async with self._sessions() as session:
+            query = select(CloudPlugin).where(CloudPlugin.user_id == user_id)
+            if enabled_only:
+                query = query.where(CloudPlugin.enabled.is_(True))
+            return list(await session.scalars(query.order_by(CloudPlugin.name)))
+
+    async def delete_plugin(self, user_id: UUID, plugin_id: UUID) -> None:
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudPlugin).where(
+                    CloudPlugin.id == plugin_id, CloudPlugin.user_id == user_id
+                )
+            )
+            if item is None:
+                raise StoreNotFoundError("plugin not found")
+            await session.delete(item)
+
+    async def claim_next_plugin_task(
+        self, worker_id: str, *, lease_seconds: int = 60
+    ) -> tuple[CloudPluginTask, CloudPlugin] | None:
+        now = utc_now()
+        owner = worker_id[:200]
+        async with self._sessions.begin() as session:
+            task = await session.scalar(
+                select(CloudPluginTask)
+                .join(CloudPlugin, CloudPlugin.id == CloudPluginTask.plugin_id)
+                .where(
+                    CloudPluginTask.enabled.is_(True),
+                    CloudPlugin.enabled.is_(True),
+                    CloudPluginTask.next_run_at <= now,
+                    (CloudPluginTask.lease_expires_at.is_(None))
+                    | (CloudPluginTask.lease_expires_at < now),
+                )
+                .order_by(CloudPluginTask.next_run_at, CloudPluginTask.id)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if task is None:
+                return None
+            plugin = await session.get(CloudPlugin, task.plugin_id)
+            if plugin is None:
+                return None
+            task.lease_owner = owner
+            task.lease_expires_at = now + timedelta(seconds=max(10, lease_seconds))
+            return task, plugin
+
+    async def finish_plugin_task(
+        self,
+        task_id: UUID,
+        worker_id: str,
+        *,
+        error: str = "",
+    ) -> None:
+        async with self._sessions.begin() as session:
+            task = await session.scalar(
+                select(CloudPluginTask)
+                .where(CloudPluginTask.id == task_id)
+                .with_for_update()
+            )
+            if task is None or task.lease_owner != worker_id[:200]:
+                raise StoreStateError("plugin worker does not own this task")
+            task.next_run_at = utc_now() + timedelta(seconds=task.interval_seconds)
+            task.lease_owner = None
+            task.lease_expires_at = None
+            task.last_error = error[:500]
+            task.updated_at = utc_now()
+
+    async def create_subagent_job(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        *,
+        task: str,
+        label: str,
+        profile: str,
+        max_iterations: int,
+        status: str = "queued",
+    ) -> CloudSubagentJob:
+        async with self._sessions.begin() as session:
+            conversation = await session.scalar(
+                select(Conversation.id).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id,
+                )
+            )
+            if conversation is None:
+                raise StoreNotFoundError("conversation not found")
+            active = await session.scalar(
+                select(func.count(CloudSubagentJob.id)).where(
+                    CloudSubagentJob.user_id == user_id,
+                    CloudSubagentJob.status.in_(("queued", "running")),
+                )
+            )
+            if int(active or 0) >= 3:
+                raise StoreStateError("subagent capacity reached (limit 3 per user)")
+            item = CloudSubagentJob(
+                id=f"sub_{uuid4().hex[:12]}",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                task=task,
+                label=label[:200],
+                profile=profile,
+                max_iterations=max_iterations,
+                status=status,
+                started_at=utc_now() if status == "running" else None,
+            )
+            session.add(item)
+            return item
+
+    async def list_subagent_jobs(self, user_id: UUID) -> list[CloudSubagentJob]:
+        async with self._sessions() as session:
+            return list(
+                await session.scalars(
+                    select(CloudSubagentJob)
+                    .where(CloudSubagentJob.user_id == user_id)
+                    .order_by(CloudSubagentJob.created_at.desc())
+                    .limit(100)
+                )
+            )
+
+    async def cancel_subagent_job(
+        self, user_id: UUID, task_id: str
+    ) -> CloudSubagentJob:
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudSubagentJob)
+                .where(
+                    CloudSubagentJob.id == task_id,
+                    CloudSubagentJob.user_id == user_id,
+                )
+                .with_for_update()
+            )
+            if item is None:
+                raise StoreNotFoundError("subagent job not found")
+            if item.status == "queued":
+                item.status = "cancelled"
+                item.completed_at = utc_now()
+            elif item.status == "running":
+                item.cancel_requested_at = utc_now()
+            return item
+
+    async def claim_next_subagent_job(
+        self, worker_id: str, *, lease_seconds: int = 180
+    ) -> CloudSubagentJob | None:
+        now = utc_now()
+        async with self._sessions.begin() as session:
+            stale = list(
+                await session.scalars(
+                    select(CloudSubagentJob)
+                    .where(
+                        CloudSubagentJob.status == "running",
+                        CloudSubagentJob.lease_expires_at < now,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(20)
+                )
+            )
+            for item in stale:
+                item.status = "queued"
+                item.lease_owner = None
+                item.lease_expires_at = None
+            item = await session.scalar(
+                select(CloudSubagentJob)
+                .where(CloudSubagentJob.status == "queued")
+                .order_by(CloudSubagentJob.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if item is None:
+                return None
+            item.status = "running"
+            item.started_at = item.started_at or now
+            item.lease_owner = worker_id[:200]
+            item.lease_expires_at = now + timedelta(seconds=max(30, lease_seconds))
+            return item
+
+    async def claim_subagent_job(
+        self, task_id: str, worker_id: str, *, lease_seconds: int = 180
+    ) -> CloudSubagentJob:
+        now = utc_now()
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudSubagentJob)
+                .where(CloudSubagentJob.id == task_id)
+                .with_for_update()
+            )
+            if item is None or item.status != "queued":
+                raise StoreStateError("subagent job is not claimable")
+            item.status = "running"
+            item.started_at = now
+            item.lease_owner = worker_id[:200]
+            item.lease_expires_at = now + timedelta(seconds=max(30, lease_seconds))
+            return item
+
+    async def heartbeat_subagent_job(
+        self, task_id: str, worker_id: str, *, lease_seconds: int = 180
+    ) -> bool:
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudSubagentJob)
+                .where(CloudSubagentJob.id == task_id)
+                .with_for_update()
+            )
+            if item is None or item.lease_owner != worker_id[:200]:
+                raise StoreStateError("subagent worker does not own this job")
+            item.lease_expires_at = utc_now() + timedelta(
+                seconds=max(30, lease_seconds)
+            )
+            return item.cancel_requested_at is not None
+
+    async def finish_subagent_job(
+        self,
+        task_id: str,
+        worker_id: str,
+        *,
+        status: str,
+        result: str,
+        metadata: dict,
+        deliver: bool,
+    ) -> CloudSubagentJob:
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudSubagentJob)
+                .where(CloudSubagentJob.id == task_id)
+                .with_for_update()
+            )
+            if item is None or item.lease_owner != worker_id[:200]:
+                raise StoreStateError("subagent worker does not own this job")
+            if item.cancel_requested_at is not None:
+                status, result = "cancelled", "后台子任务已由用户取消。"
+            item.status = status
+            item.result = result[:1_000_000]
+            item.result_metadata = dict(metadata)
+            item.lease_owner = None
+            item.lease_expires_at = None
+            item.completed_at = utc_now()
+            if deliver:
+                conversation = await session.scalar(
+                    select(Conversation)
+                    .where(Conversation.id == item.conversation_id)
+                    .with_for_update()
+                )
+                if conversation is None:
+                    raise StoreNotFoundError("parent conversation not found")
+                message = Message(
+                    conversation_id=conversation.id,
+                    seq=conversation.next_message_seq,
+                    role="assistant",
+                    content=f"[子代理 {item.label or item.id}]\n{item.result}",
+                    agent_metadata={"subagent_job_id": item.id, **dict(metadata)},
+                    delivery_key=f"subagent:{item.id}",
+                )
+                conversation.next_message_seq += 1
+                conversation.updated_at = utc_now()
+                session.add(message)
+                await session.flush()
+                await self._enqueue_channel_deliveries(session, message)
+            return item
+
+    async def create_skill(
+        self,
+        user_id: UUID,
+        *,
+        name: str,
+        description: str,
+        when_to_use: str,
+        body: str,
+        always: bool,
+    ) -> CloudSkill:
+        item = CloudSkill(
+            user_id=user_id,
+            name=name,
+            description=description[:1000] or "-",
+            when_to_use=when_to_use[:2000],
+            body=body,
+            always=always,
+        )
+        try:
+            async with self._sessions.begin() as session:
+                session.add(item)
+                await session.flush()
+                return item
+        except IntegrityError as exc:
+            raise StoreConflictError("skill name already exists") from exc
+
+    async def list_skills(
+        self, user_id: UUID, *, enabled_only: bool = False
+    ) -> list[CloudSkill]:
+        async with self._sessions() as session:
+            query = select(CloudSkill).where(CloudSkill.user_id == user_id)
+            if enabled_only:
+                query = query.where(CloudSkill.enabled.is_(True))
+            return list(await session.scalars(query.order_by(CloudSkill.name)))
+
+    async def delete_skill(self, user_id: UUID, skill_id: UUID) -> None:
+        async with self._sessions.begin() as session:
+            item = await session.scalar(
+                select(CloudSkill).where(
+                    CloudSkill.id == skill_id, CloudSkill.user_id == user_id
+                )
+            )
+            if item is None:
+                raise StoreNotFoundError("skill not found")
+            await session.delete(item)
+
+    async def delete_channel_link(self, user_id: UUID, link_id: UUID) -> None:
+        async with self._sessions.begin() as session:
+            link = await session.scalar(
+                select(ChannelLink).where(
+                    ChannelLink.id == link_id, ChannelLink.user_id == user_id
+                )
+            )
+            if link is None:
+                raise StoreNotFoundError("channel link not found")
+            await session.delete(link)
+
+    async def enqueue_channel_push(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        *,
+        provider: str,
+        external_chat_id: str,
+        content: str,
+        media: list[str],
+    ) -> Message:
+        async with self._sessions.begin() as session:
+            link = await session.scalar(
+                select(ChannelLink).where(
+                    ChannelLink.user_id == user_id,
+                    ChannelLink.conversation_id == conversation_id,
+                    ChannelLink.provider == provider,
+                    ChannelLink.external_chat_id == external_chat_id,
+                    ChannelLink.enabled.is_(True),
+                )
+            )
+            if link is None:
+                raise StoreNotFoundError("target channel is not linked to this conversation")
+            conversation = await session.scalar(
+                select(Conversation)
+                .where(Conversation.id == conversation_id)
+                .with_for_update()
+            )
+            if conversation is None:
+                raise StoreNotFoundError("conversation not found")
+            message = Message(
+                conversation_id=conversation.id,
+                seq=conversation.next_message_seq,
+                role="assistant",
+                content=content,
+                agent_metadata={"source": "message_push", "media": list(media)},
+                delivery_key=f"push:{uuid4().hex}",
+            )
+            conversation.next_message_seq += 1
+            conversation.updated_at = utc_now()
+            session.add(message)
+            await session.flush()
+            session.add(ChannelDelivery(link_id=link.id, message_id=message.id))
+            return message
+
+    async def ingest_channel_message(
+        self,
+        *,
+        provider: str,
+        external_event_id: str,
+        external_chat_id: str,
+        content: str,
+        file_ids: list[UUID] | None = None,
+    ) -> tuple[Message, Run, bool]:
+        if not content.strip():
+            raise ValueError("channel message must not be blank")
+        try:
+            async with self._sessions.begin() as session:
+                existing = await session.scalar(
+                    select(ChannelInboundEvent).where(
+                        ChannelInboundEvent.provider == provider,
+                        ChannelInboundEvent.external_event_id == external_event_id,
+                    )
+                )
+                if existing is not None:
+                    message = await session.get(Message, existing.message_id)
+                    run = await session.scalar(
+                        select(Run).where(Run.input_message_id == existing.message_id)
+                    )
+                    if message is None or run is None:
+                        raise StoreStateError("channel idempotency record is incomplete")
+                    return message, run, False
+                link = await session.scalar(
+                    select(ChannelLink).where(
+                        ChannelLink.provider == provider,
+                        ChannelLink.external_chat_id == external_chat_id,
+                        ChannelLink.enabled.is_(True),
+                    )
+                )
+                if link is None:
+                    raise StoreNotFoundError("channel chat is not linked")
+                conversation = await session.scalar(
+                    select(Conversation)
+                    .where(Conversation.id == link.conversation_id)
+                    .with_for_update()
+                )
+                if conversation is None:
+                    raise StoreStateError("channel conversation is missing")
+                files: list[UserFile] = []
+                if file_ids:
+                    files = list(
+                        await session.scalars(
+                            select(UserFile).where(
+                                UserFile.id.in_(file_ids),
+                                UserFile.user_id == link.user_id,
+                                UserFile.conversation_id == conversation.id,
+                            )
+                        )
+                    )
+                    if len({item.id for item in files}) != len(set(file_ids)):
+                        raise StoreNotFoundError("one or more channel files were not found")
+                message = Message(
+                    conversation_id=conversation.id,
+                    seq=conversation.next_message_seq,
+                    role="user",
+                    content=content,
+                    agent_metadata={
+                        "channel": provider,
+                        "channel_link_id": str(link.id),
+                        "attachments": [
+                            {
+                                "id": str(item.id),
+                                "path": item.workspace_path,
+                                "filename": item.filename,
+                                "content_type": item.content_type,
+                                "size_bytes": item.size_bytes,
+                            }
+                            for item in files
+                        ],
+                        "media": [item.workspace_path for item in files],
+                    },
+                )
+                conversation.next_message_seq += 1
+                conversation.updated_at = utc_now()
+                session.add(message)
+                await session.flush()
+                run = Run(
+                    user_id=link.user_id,
+                    conversation_id=conversation.id,
+                    input_message_id=message.id,
+                    status="queued",
+                    idempotency_key=f"channel:{provider}:{external_event_id}"[:128],
+                )
+                session.add(run)
+                await session.flush()
+                session.add(
+                    ChannelInboundEvent(
+                        provider=provider,
+                        external_event_id=external_event_id,
+                        link_id=link.id,
+                        message_id=message.id,
+                    )
+                )
+                await self._append_run_event(
+                    session,
+                    run,
+                    "run.queued",
+                    {"status": "queued", "channel": provider},
+                )
+                return message, run, True
+        except IntegrityError:
+            async with self._sessions() as session:
+                existing = await session.scalar(
+                    select(ChannelInboundEvent).where(
+                        ChannelInboundEvent.provider == provider,
+                        ChannelInboundEvent.external_event_id == external_event_id,
+                    )
+                )
+                if existing is None:
+                    raise
+                message = await session.get(Message, existing.message_id)
+                run = await session.scalar(select(Run).where(Run.input_message_id == message.id))
+                return message, run, False
+
+    async def claim_channel_delivery(
+        self, worker_id: str, *, lease_seconds: int = 60
+    ) -> tuple[ChannelDelivery, ChannelLink, Message] | None:
+        now = utc_now()
+        async with self._sessions.begin() as session:
+            expired = list(
+                await session.scalars(
+                    select(ChannelDelivery)
+                    .where(
+                        ChannelDelivery.status == "running",
+                        ChannelDelivery.lease_expires_at < now,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(20)
+                )
+            )
+            for item in expired:
+                item.status = "pending"
+                item.lease_owner = None
+                item.lease_expires_at = None
+            delivery = await session.scalar(
+                select(ChannelDelivery)
+                .where(ChannelDelivery.status == "pending")
+                .order_by(ChannelDelivery.created_at, ChannelDelivery.id)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if delivery is None:
+                return None
+            delivery.status = "running"
+            delivery.lease_owner = worker_id[:200]
+            delivery.lease_expires_at = now + timedelta(seconds=max(10, lease_seconds))
+            delivery.attempt += 1
+            link = await session.get(ChannelLink, delivery.link_id)
+            message = await session.get(Message, delivery.message_id)
+            if link is None or message is None:
+                delivery.status = "failed"
+                delivery.last_error = "delivery dependency is missing"
+                return None
+            return delivery, link, message
+
+    async def finish_channel_delivery(
+        self, delivery_id: int, worker_id: str, *, sent: bool, error: str = ""
+    ) -> None:
+        async with self._sessions.begin() as session:
+            delivery = await session.scalar(
+                select(ChannelDelivery)
+                .where(ChannelDelivery.id == delivery_id)
+                .with_for_update()
+            )
+            if delivery is None or delivery.lease_owner != worker_id[:200]:
+                raise StoreStateError("channel worker does not own delivery")
+            delivery.status = "sent" if sent else (
+                "pending" if delivery.attempt < 5 else "failed"
+            )
+            delivery.last_error = error[:500]
+            delivery.sent_at = utc_now() if sent else None
+            delivery.lease_owner = None
+            delivery.lease_expires_at = None
+
+    async def _enqueue_channel_deliveries(
+        self, session: AsyncSession, message: Message
+    ) -> None:
+        links = list(
+            await session.scalars(
+                select(ChannelLink).where(
+                    ChannelLink.conversation_id == message.conversation_id,
+                    ChannelLink.enabled.is_(True),
+                )
+            )
+        )
+        for link in links:
+            session.add(ChannelDelivery(link_id=link.id, message_id=message.id))
+
+    async def create_scheduled_job(
+        self,
+        user_id: UUID,
+        conversation_id: UUID,
+        *,
+        message: str,
+        prompt: str,
+        run_at: datetime,
+        interval_seconds: int,
+        remaining_runs: int,
+        tier: str,
+        trigger: str,
+        cron_expr: str,
+        timezone: str,
+        name: str,
+    ) -> ScheduledJob:
+        async with self._sessions.begin() as session:
+            conversation = await session.scalar(
+                select(Conversation).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id,
+                )
+            )
+            if conversation is None:
+                raise StoreNotFoundError("conversation not found")
+            active = await session.scalar(
+                select(func.count(ScheduledJob.id)).where(
+                    ScheduledJob.user_id == user_id,
+                    ScheduledJob.status.in_(("pending", "running")),
+                )
+            )
+            if int(active or 0) >= 10:
+                raise StoreConflictError("schedule_capacity_reached active=10 max=10")
+            job = ScheduledJob(
+                id=f"job_{uuid4().hex[:20]}",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message=message,
+                prompt=prompt,
+                run_at=run_at,
+                interval_seconds=max(0, int(interval_seconds)),
+                remaining_runs=int(remaining_runs),
+                tier=tier,
+                trigger=trigger,
+                cron_expr=cron_expr,
+                timezone=timezone,
+                name=name[:200],
+            )
+            session.add(job)
+            await session.flush()
+            return job
+
+    async def list_scheduled_jobs(
+        self, user_id: UUID, *, include_finished: bool = False
+    ) -> list[ScheduledJob]:
+        async with self._sessions() as session:
+            query = select(ScheduledJob).where(ScheduledJob.user_id == user_id)
+            if not include_finished:
+                query = query.where(ScheduledJob.status.in_(("pending", "running")))
+            return list(await session.scalars(query.order_by(ScheduledJob.run_at)))
+
+    async def cancel_scheduled_job(self, user_id: UUID, job_id: str) -> ScheduledJob:
+        async with self._sessions.begin() as session:
+            job = await session.scalar(
+                select(ScheduledJob)
+                .where(ScheduledJob.id == job_id, ScheduledJob.user_id == user_id)
+                .with_for_update()
+            )
+            if job is None:
+                raise StoreNotFoundError("schedule not found")
+            if job.status != "pending":
+                raise StoreStateError(f"schedule is already {job.status}")
+            job.status = "cancelled"
+            job.updated_at = utc_now()
+            return job
+
+    async def claim_next_scheduled_job(
+        self, worker_id: str, *, lease_seconds: int = 60
+    ) -> ScheduledJob | None:
+        now = utc_now()
+        owner = worker_id[:200]
+        async with self._sessions.begin() as session:
+            expired = list(
+                await session.scalars(
+                    select(ScheduledJob)
+                    .where(
+                        ScheduledJob.status == "running",
+                        ScheduledJob.lease_expires_at < now,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(20)
+                )
+            )
+            for job in expired:
+                job.status = "pending"
+                job.lease_owner = None
+                job.lease_expires_at = None
+
+            candidates = list(
+                await session.scalars(
+                    select(ScheduledJob)
+                    .where(
+                        ScheduledJob.status == "pending",
+                        ScheduledJob.run_at <= now,
+                    )
+                    .order_by(ScheduledJob.run_at, ScheduledJob.id)
+                    .with_for_update(skip_locked=True)
+                    .limit(20)
+                )
+            )
+            for job in candidates:
+                job_run_at = job.run_at
+                if job_run_at.tzinfo is None:  # SQLite contract-test normalization
+                    job_run_at = job_run_at.replace(tzinfo=UTC)
+                # Preserve the original restart misfire behavior. A job with a
+                # fire_token was already attempted and must instead be replayed
+                # idempotently after lease recovery.
+                if job.fire_token is None and (now - job_run_at).total_seconds() > 300:
+                    if job.trigger == "every" or (
+                        job.interval_seconds > 0 and job.remaining_runs > 1
+                    ):
+                        from agent.scheduler import next_cron_fire
+
+                        if job.cron_expr:
+                            job.run_at = next_cron_fire(
+                                job.cron_expr, job.timezone, now
+                            ).astimezone(UTC)
+                        else:
+                            next_at = job_run_at
+                            while next_at <= now:
+                                next_at += timedelta(seconds=job.interval_seconds)
+                            job.run_at = next_at
+                    else:
+                        job.status = "missed"
+                        job.last_error = "missed while scheduler was offline"
+                    job.updated_at = now
+                    continue
+                job.status = "running"
+                job.lease_owner = owner
+                job.lease_expires_at = now + timedelta(seconds=max(10, lease_seconds))
+                job.fire_token = job.fire_token or uuid4().hex
+                job.updated_at = now
+                return job
+        return None
+
+    async def heartbeat_scheduled_job(
+        self, job_id: str, worker_id: str, fire_token: str, *, lease_seconds: int = 60
+    ) -> None:
+        async with self._sessions.begin() as session:
+            job = await session.scalar(
+                select(ScheduledJob).where(ScheduledJob.id == job_id).with_for_update()
+            )
+            if (
+                job is None
+                or job.status != "running"
+                or job.lease_owner != worker_id[:200]
+                or job.fire_token != fire_token
+            ):
+                raise StoreStateError("scheduler worker does not own this fire")
+            job.lease_expires_at = utc_now() + timedelta(seconds=max(10, lease_seconds))
+            job.updated_at = utc_now()
+
+    async def deliver_scheduled_job(
+        self, job_id: str, worker_id: str, fire_token: str
+    ) -> Message | Run:
+        owner = worker_id[:200]
+        delivery_key = f"schedule:{job_id}:{fire_token}"[:128]
+        async with self._sessions.begin() as session:
+            job = await session.scalar(
+                select(ScheduledJob).where(ScheduledJob.id == job_id).with_for_update()
+            )
+            if (
+                job is None
+                or job.status != "running"
+                or job.lease_owner != owner
+                or job.fire_token != fire_token
+            ):
+                raise StoreStateError("scheduler delivery has no matching lease")
+            conversation = await session.scalar(
+                select(Conversation)
+                .where(
+                    Conversation.id == job.conversation_id,
+                    Conversation.user_id == job.user_id,
+                )
+                .with_for_update()
+            )
+            if conversation is None:
+                raise StoreStateError("schedule conversation is missing")
+            if job.tier == "instant":
+                existing = await session.scalar(
+                    select(Message).where(
+                        Message.conversation_id == conversation.id,
+                        Message.delivery_key == delivery_key,
+                    )
+                )
+                if existing is not None:
+                    return existing
+                busy = await session.scalar(
+                    select(func.count(Run.id)).where(
+                        Run.conversation_id == conversation.id,
+                        Run.status.in_(("queued", "running")),
+                    )
+                )
+                if int(busy or 0):
+                    raise StoreStateError("conversation has an active passive Run")
+                message = Message(
+                    conversation_id=conversation.id,
+                    seq=conversation.next_message_seq,
+                    role="assistant",
+                    content=job.message,
+                    agent_metadata={"scheduled_job_id": job.id, "source": "scheduler"},
+                    delivery_key=delivery_key,
+                )
+                conversation.next_message_seq += 1
+                conversation.updated_at = utc_now()
+                session.add(message)
+                await session.flush()
+                await self._enqueue_channel_deliveries(session, message)
+                return message
+
+            idempotency_key = delivery_key
+            existing_run = await session.scalar(
+                select(Run).where(
+                    Run.user_id == job.user_id,
+                    Run.idempotency_key == idempotency_key,
+                )
+            )
+            if existing_run is not None:
+                return existing_run
+            message = Message(
+                conversation_id=conversation.id,
+                seq=conversation.next_message_seq,
+                role="user",
+                content=job.prompt,
+                agent_metadata={
+                    "scheduled_job_id": job.id,
+                    "session_key_override": f"scheduler:{job.id}",
+                    "omit_user_turn": True,
+                    "skip_post_memory": True,
+                    "skip_memory_retrieval": True,
+                    "disabled_tools": [
+                        "message_push",
+                        "recall_memory",
+                        "memorize",
+                        "reinforce_memory",
+                        "forget_memory",
+                    ],
+                },
+                delivery_key=f"schedule-input:{job.id}:{fire_token}"[:128],
+            )
+            conversation.next_message_seq += 1
+            conversation.updated_at = utc_now()
+            session.add(message)
+            await session.flush()
+            run = Run(
+                user_id=job.user_id,
+                conversation_id=conversation.id,
+                input_message_id=message.id,
+                status="queued",
+                idempotency_key=idempotency_key,
+            )
+            session.add(run)
+            await session.flush()
+            await self._append_run_event(
+                session,
+                run,
+                "run.queued",
+                {
+                    "status": "queued",
+                    "input_message_id": str(message.id),
+                    "scheduled_job_id": job.id,
+                },
+            )
+            return run
+
+    async def finish_scheduled_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        fire_token: str,
+        *,
+        status: str,
+        remaining_runs: int,
+        next_run_at: datetime | None = None,
+        error: str = "",
+    ) -> ScheduledJob:
+        async with self._sessions.begin() as session:
+            job = await session.scalar(
+                select(ScheduledJob).where(ScheduledJob.id == job_id).with_for_update()
+            )
+            if (
+                job is None
+                or job.lease_owner != worker_id[:200]
+                or job.fire_token != fire_token
+            ):
+                raise StoreStateError("scheduler worker does not own this fire")
+            job.status = status
+            job.remaining_runs = remaining_runs
+            if next_run_at is not None:
+                job.run_at = next_run_at
+            job.last_error = error[:500]
+            job.lease_owner = None
+            job.lease_expires_at = None
+            # A postponed pre-delivery attempt gets a fresh token; a successfully
+            # delivered repeating fire also advances to a fresh idempotency slot.
+            job.fire_token = None if status == "pending" else job.fire_token
+            job.updated_at = utc_now()
+            return job
 
     async def heartbeat_worker(
         self,
@@ -750,6 +1846,7 @@ class CloudStore:
             conversation.updated_at = utc_now()
             session.add(message)
             await session.flush()
+            await self._enqueue_channel_deliveries(session, message)
             return message
 
     async def list_messages(
@@ -779,9 +1876,10 @@ class CloudStore:
         content: str,
         *,
         idempotency_key: str | None = None,
+        file_ids: list[UUID] | None = None,
     ) -> tuple[Message, Run]:
-        if not content.strip():
-            raise ValueError("message content must not be blank")
+        if not content.strip() and not file_ids:
+            raise ValueError("message content or file_ids must not be empty")
         key = (idempotency_key or "").strip() or None
         if key is not None and (len(key) > 128 or any(ord(c) < 33 for c in key)):
             raise ValueError("invalid Idempotency-Key")
@@ -812,11 +1910,37 @@ class CloudStore:
                 )
                 if conversation is None:
                     raise StoreNotFoundError("conversation not found")
+                files: list[UserFile] = []
+                if file_ids:
+                    files = list(
+                        await session.scalars(
+                            select(UserFile).where(
+                                UserFile.id.in_(file_ids),
+                                UserFile.user_id == user_id,
+                                UserFile.conversation_id == conversation_id,
+                            )
+                        )
+                    )
+                    if len({item.id for item in files}) != len(set(file_ids)):
+                        raise StoreNotFoundError("one or more files were not found")
                 message = Message(
                     conversation_id=conversation.id,
                     seq=conversation.next_message_seq,
                     role="user",
                     content=content,
+                    agent_metadata={
+                        "attachments": [
+                            {
+                                "id": str(item.id),
+                                "path": item.workspace_path,
+                                "filename": item.filename,
+                                "content_type": item.content_type,
+                                "size_bytes": item.size_bytes,
+                            }
+                            for item in files
+                        ],
+                        "media": [item.workspace_path for item in files],
+                    },
                 )
                 conversation.next_message_seq += 1
                 conversation.updated_at = utc_now()
@@ -997,6 +2121,7 @@ class CloudStore:
                 conversation.last_consolidated = max(0, int(last_consolidated))
             session.add(output)
             await session.flush()
+            await self._enqueue_channel_deliveries(session, output)
             run.output_message_id = output.id
             run.status = "completed"
             run.completed_at = utc_now()

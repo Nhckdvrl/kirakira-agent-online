@@ -5,12 +5,37 @@ from __future__ import annotations
 import httpx
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from cloud.api import create_app
 from cloud.database import CloudSettings
 from cloud.models import Base
+from agent.tools.execution_backend import ExecutionBackendDescriptor
+from agent.tools.unified_exec import ExecutionCleanupReport
+
+
+class _WorkspaceBackend:
+    descriptor = ExecutionBackendDescriptor(
+        "test-isolated", isolated=True, host_execution=False, workspace_isolated=True
+    )
+
+    def __init__(self):
+        self.files = {}
+
+    async def probe(self):
+        return self.descriptor
+
+    async def write_binary(self, owner, path, content):
+        self.files[(owner, path)] = content
+        return f"Wrote {path}"
+
+    async def read_binary(self, owner, path):
+        return self.files[(owner, path)]
+
+    async def shutdown(self):
+        return ExecutionCleanupReport((), (), ())
 
 
 @pytest_asyncio.fixture
@@ -23,9 +48,11 @@ async def api_client():
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    backend = _WorkspaceBackend()
     app = create_app(
         session_factory=factory,
         settings=CloudSettings("sqlite+aiosqlite://", session_cookie_secure=False),
+        workspace_backend=backend,  # type: ignore[arg-type]
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -113,6 +140,122 @@ async def test_configure_automation_and_ingest_event(api_client):
         },
     )
     assert duplicate.json() == {**event.json(), "accepted": False}
+
+
+@pytest.mark.asyncio
+async def test_upload_file_attach_to_run_and_download_with_tenant_boundary(api_client):
+    await _register(api_client, "files@example.com")
+    conversation = (await api_client.post("/v1/conversations", json={})).json()
+    uploaded = await api_client.post(
+        f"/v1/conversations/{conversation['id']}/files",
+        json={
+            "filename": "pixel.png",
+            "content_type": "image/png",
+            "content_base64": "iVBORw0KGgo=",
+        },
+    )
+    assert uploaded.status_code == 201
+    item = uploaded.json()
+    accepted = await api_client.post(
+        f"/v1/conversations/{conversation['id']}/messages",
+        json={"content": "inspect this", "file_ids": [item["id"]]},
+    )
+    assert accepted.status_code == 202
+    messages = await api_client.get(
+        f"/v1/conversations/{conversation['id']}/messages"
+    )
+    attachment = messages.json()[0]["agent_metadata"]["attachments"][0]
+    assert attachment["filename"] == "pixel.png"
+    downloaded = await api_client.get(f"/v1/files/{item['id']}")
+    assert downloaded.content == __import__("base64").b64decode("iVBORw0KGgo=")
+
+    transport = api_client._transport
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as bob:
+        await _register(bob, "files-bob@example.com")
+        assert (await bob.get(f"/v1/files/{item['id']}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_cloud_ui_is_served_with_locked_down_csp(api_client):
+    response = await api_client.get("/")
+    assert response.status_code == 200
+    assert "Kirakira Cloud Agent" in response.text
+    assert "script-src 'self'" in response.headers["content-security-policy"]
+    assert (await api_client.get("/settings.css")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_user_skill_crud_is_tenant_scoped(api_client):
+    await _register(api_client, "skills-api@example.com")
+    created = await api_client.post(
+        "/v1/skills",
+        json={
+            "content": "---\nname: private-skill\ndescription: Private\nalways: true\n---\nUse this workflow."
+        },
+    )
+    assert created.status_code == 201 and created.json()["always"] is True
+    assert [item["name"] for item in (await api_client.get("/v1/skills")).json()] == [
+        "private-skill"
+    ]
+    transport = api_client._transport
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as bob:
+        await _register(bob, "skills-api-bob@example.com")
+        assert (await bob.get("/v1/skills")).json() == []
+        assert (
+            await bob.delete(f"/v1/skills/{created.json()['id']}")
+        ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_remote_plugin_registration_validates_manifest_and_hides_headers(
+    api_client, monkeypatch
+):
+    import cloud.api as api_module
+
+    await _register(api_client, "plugin-api@example.com")
+    monkeypatch.setenv("KIRAKIRA_CREDENTIAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(api_module, "validate_remote_plugin_url", lambda value: value)
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "phases": ["before_turn"],
+                "tools": [
+                    {
+                        "name": "echo",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
+            }
+
+    class IntegrationClient:
+        def __init__(self, **kwargs):
+            assert kwargs["headers"]["Authorization"] == "Bearer hidden"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, path):
+            assert path == "v1/manifest"
+            return Response()
+
+    monkeypatch.setattr(api_module.httpx, "AsyncClient", IntegrationClient)
+    created = await api_client.post(
+        "/v1/plugins",
+        json={
+            "name": "demo",
+            "base_url": "https://plugin.example.test",
+            "headers": {"Authorization": "Bearer hidden"},
+        },
+    )
+    assert created.status_code == 201
+    assert "headers" not in created.json() and "encrypted_headers" not in created.json()
 
 
 @pytest.mark.asyncio

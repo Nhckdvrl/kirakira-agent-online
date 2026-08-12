@@ -16,7 +16,13 @@ async def run() -> None:
         try:
             loop.add_signal_handler(
                 signum,
-                lambda: (runtime.worker.stop(), runtime.automation_worker.stop()),
+                lambda: (
+                    runtime.worker.stop(),
+                    runtime.automation_worker.stop(),
+                    runtime.schedule_worker.stop(),
+                    runtime.plugin_worker.stop(),
+                    runtime.subagent_worker.stop(),
+                ),
             )
         except NotImplementedError:  # pragma: no cover - Windows event loop
             pass
@@ -25,6 +31,15 @@ async def run() -> None:
             tasks.create_task(runtime.worker.run_forever(), name="passive-runs")
             tasks.create_task(
                 runtime.automation_worker.run_forever(), name="agent-automations"
+            )
+            tasks.create_task(
+                runtime.schedule_worker.run_forever(), name="scheduled-jobs"
+            )
+            tasks.create_task(
+                runtime.plugin_worker.run_forever(), name="plugin-jobs-sources"
+            )
+            tasks.create_task(
+                runtime.subagent_worker.run_forever(), name="subagent-jobs"
             )
     finally:
         await runtime.aclose()

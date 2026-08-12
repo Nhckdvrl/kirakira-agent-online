@@ -123,6 +123,14 @@ async def _run_plugin_modules(modules: List[object], ctx: Any) -> Any:
     return current
 
 
+def _turn_phase_modules(static: List[object], field: str) -> List[object]:
+    """Compose process capabilities with the per-turn leased generation."""
+
+    snapshot = get_current_runtime_snapshot()
+    dynamic = list(getattr(snapshot, field, ())) if snapshot is not None else []
+    return [*static, *dynamic]
+
+
 class DefaultReasoner:
     def __init__(
         self,
@@ -201,7 +209,10 @@ class DefaultReasoner:
             )
             render_ctx = await self.event_bus.emit(render_ctx)
             render_ctx = await _run_plugin_modules(
-                self._prompt_render_modules, render_ctx
+                _turn_phase_modules(
+                    self._prompt_render_modules, "prompt_render_modules"
+                ),
+                render_ctx,
             )
             rendered = self.context.render(
                 channel=render_ctx.channel,
@@ -382,7 +393,10 @@ class DefaultReasoner:
                 visible_tool_names=visible_names,
             )
             before_step = await self.event_bus.emit(before_step)
-            before_step = await _run_plugin_modules(self._before_step_modules, before_step)
+            before_step = await _run_plugin_modules(
+                _turn_phase_modules(self._before_step_modules, "before_step_modules"),
+                before_step,
+            )
             if before_step.early_stop:
                 return ReasonerResult(
                     reply=before_step.early_stop_reply,
@@ -834,7 +848,12 @@ class DefaultReasoner:
         async def invoke(tool_name: str, arguments: JsonDict) -> ToolResult:
             return await registry.execute_async(ToolCall(call.id, tool_name, arguments))
 
-        result = await self._tool_executor.execute(request, invoke)
+        snapshot = get_current_runtime_snapshot()
+        result = await self._tool_executor.execute(
+            request,
+            invoke,
+            additional_hooks=list(snapshot.tool_hooks) if snapshot is not None else None,
+        )
         content = result.output
         if result.extra_messages:
             content += "\n\n" + "\n".join(result.extra_messages)
@@ -934,7 +953,9 @@ class DefaultReasoner:
             has_more=has_more,
         )
         await self.event_bus.fanout(ctx)
-        await _run_plugin_modules(self._after_step_modules, ctx)
+        await _run_plugin_modules(
+            _turn_phase_modules(self._after_step_modules, "after_step_modules"), ctx
+        )
 
 
 def _engine_can_retrieve(engine: object) -> bool:
@@ -1158,7 +1179,8 @@ class PassiveTurnPipeline:
             )
             before_turn = await self.event_bus.emit(before_turn)
             before_turn = await _run_plugin_modules(
-                self._before_turn_modules, before_turn
+                _turn_phase_modules(self._before_turn_modules, "before_turn_modules"),
+                before_turn,
             )
             state.extra_metadata.update(before_turn.extra_metadata)
             if before_turn.abort:
@@ -1262,7 +1284,8 @@ class PassiveTurnPipeline:
             )
             before_turn = await self.event_bus.emit(before_turn)
             before_turn = await _run_plugin_modules(
-                self._before_turn_modules, before_turn
+                _turn_phase_modules(self._before_turn_modules, "before_turn_modules"),
+                before_turn,
             )
             state.extra_metadata.update(before_turn.extra_metadata)
             if before_turn.abort:
@@ -1295,7 +1318,12 @@ class PassiveTurnPipeline:
                 extra_hints=list(before_turn.extra_hints),
             )
             before_reasoning = await self.event_bus.emit(before_reasoning)
-            before_reasoning = await _run_plugin_modules(self._before_reasoning_modules, before_reasoning)
+            before_reasoning = await _run_plugin_modules(
+                _turn_phase_modules(
+                    self._before_reasoning_modules, "before_reasoning_modules"
+                ),
+                before_reasoning,
+            )
             if before_reasoning.abort:
                 return await self._dispatch_if_needed(state, before_reasoning.abort_reply)
 
@@ -1342,7 +1370,12 @@ class PassiveTurnPipeline:
             },
         )
         after_ctx = await self.event_bus.emit(after_ctx)
-        after_ctx = await _run_plugin_modules(self._after_reasoning_modules, after_ctx)
+        after_ctx = await _run_plugin_modules(
+            _turn_phase_modules(
+                self._after_reasoning_modules, "after_reasoning_modules"
+            ),
+            after_ctx,
+        )
         outbound_metadata = dict(after_ctx.outbound_metadata)
         correlation_id = str(msg.metadata.get("client_request_id") or "").strip()
         if correlation_id:
@@ -1504,7 +1537,10 @@ class PassiveTurnPipeline:
             extra_metadata=dict(state.extra_metadata),
         )
         await self.event_bus.fanout(after_turn)
-        await _run_plugin_modules(self._after_turn_modules, after_turn)
+        await _run_plugin_modules(
+            _turn_phase_modules(self._after_turn_modules, "after_turn_modules"),
+            after_turn,
+        )
         if state.dispatch_outbound:
             await self.bus.publish_outbound(result.outbound)
         return result.outbound
@@ -1538,7 +1574,7 @@ class PassiveTurnPipeline:
         command = content.strip().lower()
         if command == "/tools":
             # MCP 工具只挂在快照上，要连同当前代际一起列出，否则用户会以为没接上。
-            snapshot = (
+            snapshot = get_current_runtime_snapshot() or (
                 self.snapshot_store.current if self.snapshot_store is not None else None
             )
             return "\n".join(SnapshotToolView(self.tools, snapshot).names())

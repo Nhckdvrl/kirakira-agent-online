@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kirakira Cloud Agent</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/settings.css">
+</head>
+<body>
+  <main id="auth" class="auth-shell">
+    <form id="auth-form" class="panel auth-card">
+      <p class="eyebrow">KIRAKIRA CLOUD</p>
+      <h1>你的长期在线 Agent</h1>
+      <p class="muted">Conversation、Memory、Proactive、Drift 与工具执行都在用户边界内持久化。</p>
+      <label>邮箱<input id="email" type="email" autocomplete="email" required></label>
+      <label>密码<input id="password" type="password" minlength="10" autocomplete="current-password" required></label>
+      <div class="row"><button data-action="login">登录</button><button data-action="register" class="secondary">注册</button></div>
+      <p id="auth-error" class="error"></p>
+    </form>
+  </main>
+  <main id="app" class="app-shell hidden">
+    <aside class="sidebar">
+      <header><div><p class="eyebrow">KIRAKIRA</p><strong>Cloud Agent</strong></div><button id="logout" class="ghost">退出</button></header>
+      <button id="new-conversation" class="wide">＋ 新对话</button>
+      <nav id="conversations"></nav>
+    </aside>
+    <section class="chat">
+      <header class="chat-head">
+        <div><h2 id="title">选择一个对话</h2><p id="run-state" class="muted"></p></div>
+        <div class="row"><button id="schedule-open" class="secondary">定时任务</button><button id="integrations-open" class="secondary">集成</button><button id="automation-open" class="secondary">主动 Agent</button></div>
+      </header>
+      <div id="messages" class="messages"></div>
+      <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+        <textarea id="message" rows="3" placeholder="给 Kirakira 发消息…" disabled></textarea>
+        <div class="row"><label class="file-button">添加文件<input id="files" type="file" multiple hidden></label><button id="send" disabled>发送</button></div>
+      </form>
+    </section>
+  </main>
+  <dialog id="automation-dialog">
+    <form id="automation-form" method="dialog" class="panel">
+      <h2>主动 Agent</h2>
+      <p class="muted">开关只选择后台能力；实际触发仍由 Proactive/Drift 原算法决定。</p>
+      <label class="check"><input id="proactive" type="checkbox"> Proactive</label>
+      <label class="check"><input id="drift" type="checkbox"> Drift</label>
+      <label>主动上下文<textarea id="proactive-context" rows="5"></textarea></label>
+      <div class="row"><button value="cancel" class="secondary">取消</button><button id="automation-save" value="default">保存</button></div>
+    </form>
+  </dialog>
+  <dialog id="schedule-dialog">
+    <form id="schedule-form" class="panel">
+      <h2>定时任务</h2>
+      <label>要执行的内容<textarea id="schedule-message" rows="3" required></textarea></label>
+      <div class="form-grid"><label>触发方式<select id="schedule-trigger"><option value="after">延迟后</option><option value="at">指定时间</option><option value="every">重复</option></select></label><label>时间 / 时长<input id="schedule-when" placeholder="30m / 2026-08-13 09:00" required></label></div>
+      <div class="form-grid"><label>执行层级<select id="schedule-tier"><option value="instant">直接提醒</option><option value="soft">启动 Agent</option></select></label><label>重复次数<input id="schedule-repeat" type="number" min="1" max="1000" value="1"></label></div>
+      <label>时区<input id="schedule-timezone" value="Asia/Tokyo"></label>
+      <p id="schedule-error" class="error"></p><div id="schedule-list" class="settings-list"></div>
+      <div class="row"><button type="button" data-close="schedule-dialog" class="secondary">关闭</button><button type="submit">创建</button></div>
+    </form>
+  </dialog>
+  <dialog id="integrations-dialog">
+    <section class="panel integrations-panel">
+      <h2>渠道与扩展</h2>
+      <p class="muted">凭据加密保存；MCP 与 Plugin 只在当前用户的 turn 内加载。</p>
+      <details open><summary>渠道配对</summary><div class="inline-form"><select id="channel-provider"><option>telegram</option><option>qq</option><option>qqbot</option></select><button id="channel-pair" type="button">生成配对码</button></div><p id="pair-code"></p><div id="channel-list" class="settings-list"></div></details>
+      <details><summary>Remote MCP</summary><div class="form-grid"><input id="mcp-name" placeholder="名称"><input id="mcp-url" placeholder="https://…"></div><textarea id="mcp-headers" rows="2" placeholder='请求头 JSON，例如 {"Authorization":"Bearer …"}'></textarea><button id="mcp-add" type="button">添加 MCP</button><div id="mcp-list" class="settings-list"></div></details>
+      <details><summary>Cloud Plugin Service</summary><div class="form-grid"><input id="plugin-name" placeholder="名称"><input id="plugin-url" placeholder="https://…"></div><textarea id="plugin-headers" rows="2" placeholder='请求头 JSON'></textarea><button id="plugin-add" type="button">校验并添加 Plugin</button><div id="plugin-list" class="settings-list"></div></details>
+      <details><summary>用户 Skill</summary><textarea id="skill-content" rows="8" placeholder="粘贴包含 YAML frontmatter 的完整 SKILL.md"></textarea><button id="skill-add" type="button">添加 Skill</button><div id="skill-list" class="settings-list"></div></details>
+      <p id="integration-error" class="error"></p><div class="row"><button type="button" data-close="integrations-dialog" class="secondary">关闭</button></div>
+    </section>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

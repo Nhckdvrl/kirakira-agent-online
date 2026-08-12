@@ -7,7 +7,7 @@ Kirakira 的正式产品形态是多用户 Cloud Agent。文档只保留四个�
 | 文档 | 内容 |
 | --- | --- |
 | [Cloud 总方案与实施记录](./cloud-engineering/plan.md) | 产品目标、Web 调研、原始完整方案、评审、实施结果和仍需确认项 |
-| [架构总览](./architecture/overview.md) | 在线请求、worker、PostgreSQL、sandbox、Memory、Proactive/Drift 的边界 |
+| [架构总览](./architecture/overview.md) | 在线请求、worker、PostgreSQL、sandbox、渠道与用户扩展边界 |
 | [当前状态](./status/current.md) | 已完成能力与发布环境外部条件 |
 | [验证记录](./operations/verification.md) | 自动化、真实 PostgreSQL、pgvector 与构建证据 |
 

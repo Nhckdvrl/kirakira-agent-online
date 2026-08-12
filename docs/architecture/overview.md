@@ -4,12 +4,12 @@ Kirakira 是异步、多用户的在线 Agent 后端。HTTP 请求只做认证�
 进程中执行模型或工具。
 
 ```text
-Browser / Client
+Browser / Telegram / OneBot QQ / Tencent QQBot
   → FastAPI: auth, rate limit, conversation, Run admission
   → PostgreSQL: User → Conversation → Message → Run → RunEvent
   → Cloud workers: SKIP LOCKED claim + lease + heartbeat
   → canonical Agent pipeline: context → ReAct → tools → compaction → Memory
-  → remote isolated sandbox / model / embedding
+  → Bubblewrap sandbox / model / embedding / per-user MCP & plugins
   → transactional assistant Message + terminal Run
   → resumable SSE
 
@@ -51,17 +51,22 @@ pgvector/HNSW 只在用户 Memory 很大时召回候选，候选仍由原 Python
 
 ## 执行隔离
 
-Cloud 启动要求 remote sandbox `/v1/capabilities` 明确证明：`isolated=true`、
+Cloud 启动要求独立 `kirakira-sandbox` 的 `/v1/capabilities` 明确证明：`isolated=true`、
 `host_execution=false`、`workspace_isolated=true`。文件读写、binary vision、shell、stdin、timeout、
-owner cleanup 都通过同一远程 backend；Cloud readiness 不接受 host fallback。任意 Python plugin 不属于
-Cloud V1 的可信执行面，Drift 只加载随发行包审计的内置 skills。
+owner cleanup 都通过同一远程 backend；服务使用 Bubblewrap user/mount/pid/network namespace，Cloud
+readiness 不接受 host fallback。生产环境还应以独立安全域、cgroup 和磁盘配额限制资源。
+
+用户扩展不把任意 Python 导入共享 worker：MCP 和 Plugin 只连接经 SSRF 校验的公共 HTTPS 服务，凭据
+加密保存；Skill 保存声明文本并通过 task-local overlay 注入。每轮 turn 固定 snapshot lease，生命周期
+phase、tool、hook、MCP 和 Skill 不会在执行中途换代。
 
 ## 进程与运维
 
 - `kirakira-cloud-api`：可多进程，只处理 HTTP/SSE。
-- `kirakira-cloud-worker`：每实例同时轮询 passive Run 和 automation schedule。
+- `kirakira-cloud-worker`：轮询 passive Run、automation、Scheduler、Plugin job/source 和子 Agent。
+- `kirakira-sandbox`：Bubblewrap 隔离执行与 owner workspace。
+- `kirakira-channel-gateway`：Telegram、OneBot QQ 与腾讯 QQBot 渠道收发。
 - PostgreSQL + pgvector：durable state、协调、召回。
-- isolated sandbox service：独立安全域和 service token。
 - model/embedding provider：server-side credential。
 
 API/worker 提供 JSON 日志、request ID、Prometheus、`/healthz`、`/readyz`；生产 unit 位于

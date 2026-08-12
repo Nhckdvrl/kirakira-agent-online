@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from contextlib import AbstractContextManager, ExitStack
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, ExitStack
 from dataclasses import replace
 from typing import Protocol
 
@@ -31,11 +31,13 @@ class CloudPipelineExecutor:
             Callable[[str], AbstractContextManager[object]]
         ] = (),
         settle: Callable[[str], Awaitable[None]] | None = None,
+        capability_scope: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._transcripts = transcript_store
         self._scope_binders = tuple(scope_binders)
         self._settle = settle
+        self._capability_scope = capability_scope
 
     async def execute(self, request: TurnRequest) -> TurnResult:
         transcript = request.metadata.get(CLOUD_TRANSCRIPT_KEY)
@@ -48,6 +50,14 @@ class CloudPipelineExecutor:
         clean_metadata["omit_user_turn"] = True
         delegated = replace(request, metadata=clean_metadata)
 
+        if self._capability_scope is not None:
+            async with self._capability_scope(request.principal.subject_id):
+                return await self._execute_bound(request, delegated, transcript)
+        return await self._execute_bound(request, delegated, transcript)
+
+    async def _execute_bound(
+        self, request: TurnRequest, delegated: TurnRequest, transcript: dict
+    ) -> TurnResult:
         with ExitStack() as stack:
             binding = stack.enter_context(
                 self._transcripts.bind(request.conversation_id, transcript)

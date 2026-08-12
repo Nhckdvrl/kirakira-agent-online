@@ -33,6 +33,12 @@ from cloud.tool_checkpoints import build_cloud_tool_checkpoint_hooks
 from cloud.run_stream import DurableRunStreamBridge
 from cloud.worker import CloudWorker
 from cloud.automation import CloudAutomationWorker
+from cloud.scheduler import CloudScheduleWorker, CloudSchedulerTools
+from cloud.credentials import CredentialVault
+from cloud.mcp import CloudMcpCapabilities
+from cloud.plugins import CloudPluginCapabilities, CloudPluginWorker
+from cloud.subagents import CloudSubagentRuntime
+from cloud.message_push import CloudMessagePushTool
 from core.memory.markdown import MemoryLifecycleBindRequest
 from core.memory.services import MemoryServices, memory_keep_count
 from core.net.http import SharedHttpResources
@@ -45,6 +51,15 @@ class CloudMemoryContextView:
     """Prompt-block compatibility view backed by the Cloud profile store."""
 
     store: Any
+    item_store: Any
+
+    def list_records(self, *, include_forgotten: bool = False) -> list[dict]:
+        rows, _ = self.item_store.list_items_for_dashboard(
+            status="" if include_forgotten else "active",
+            page=1,
+            page_size=500,
+        )
+        return rows
 
 
 @dataclass
@@ -61,6 +76,9 @@ class CloudWorkerRuntime:
     http_resources: SharedHttpResources
     stream_bridge: DurableRunStreamBridge
     automation_worker: CloudAutomationWorker
+    schedule_worker: CloudScheduleWorker
+    plugin_worker: CloudPluginWorker
+    subagent_worker: CloudSubagentRuntime
 
     async def aclose(self) -> None:
         first_error: BaseException | None = None
@@ -160,15 +178,19 @@ async def build_cloud_worker_runtime(
         markdown=markdown,
         sync_engine=sync_engine,
     )
-    memory_context = CloudMemoryContextView(markdown.store)
+    memory_context = CloudMemoryContextView(markdown.store, memory_services.store)
+    push_tool = CloudMessagePushTool(store)
     tools = build_default_registry(
         workspace,
         memory=memory_context,  # type: ignore[arg-type]
         session_manager=transcripts,  # type: ignore[arg-type]
         memory_services=memory_services,
+        push_tool=push_tool,
         execution_backend=execution_backend,
         workspace_backend=execution_backend,
     )
+    push_tool.attach_registry(tools)
+    CloudSchedulerTools(store, tools)
     assembly = build_passive_pipeline(
         workspace=workspace,
         app_config=app_config,
@@ -191,11 +213,33 @@ async def build_cloud_worker_runtime(
         if run_id is not None:
             await stream_bridge.flush_run(run_id)
 
+    vault = CredentialVault()
+    mcp_capabilities = CloudMcpCapabilities(store, vault)
+    remote_capabilities = CloudPluginCapabilities(store, vault, mcp_capabilities)
+    subagents = CloudSubagentRuntime(
+        store=store,
+        reasoner=assembly.reasoner,
+        tools=tools,
+        memory_engine=memory_engine,
+        worker_id=f"{worker_id}:subagents",
+        scope_binders=(
+            memory_engine.bind_user,
+            markdown.store.bind_user,
+            push_tool.bind_user,
+        ),
+        capability_scope=remote_capabilities.for_user,
+    )
+    subagents.register_tools()
     executor = CloudPipelineExecutor(
         assembly.pipeline,
         transcripts,
-        scope_binders=(memory_engine.bind_user, markdown.store.bind_user),
+        scope_binders=(
+            memory_engine.bind_user,
+            markdown.store.bind_user,
+            push_tool.bind_user,
+        ),
         settle=settle,
+        capability_scope=remote_capabilities.for_user,
     )
     readiness = assess_cloud_worker_readiness(
         transcript_store=transcripts,
@@ -217,6 +261,16 @@ async def build_cloud_worker_runtime(
         execution_backend=execution_backend,
         worker_id=f"{worker_id}:automation",
     )
+    schedule_worker = CloudScheduleWorker(
+        store, worker_id=f"{worker_id}:scheduler"
+    )
+    plugin_worker = CloudPluginWorker(
+        store,
+        vault,
+        worker_id=f"{worker_id}:plugins",
+        model_client=client,
+        model=model,
+    )
     return CloudWorkerRuntime(
         worker=worker,
         executor=executor,
@@ -230,6 +284,9 @@ async def build_cloud_worker_runtime(
         http_resources=http_resources,
         stream_bridge=stream_bridge,
         automation_worker=automation_worker,
+        schedule_worker=schedule_worker,
+        plugin_worker=plugin_worker,
+        subagent_worker=subagents,
     )
 
 

@@ -84,10 +84,17 @@ class ToolExecutor:
     def add_hooks(self, hooks: List[ToolHook]) -> None:
         self._hooks.extend(hooks)
 
-    async def execute(self, request: ToolExecutionRequest, invoker) -> ToolExecutionResult:
+    async def execute(
+        self,
+        request: ToolExecutionRequest,
+        invoker,
+        *,
+        additional_hooks: List[ToolHook] | None = None,
+    ) -> ToolExecutionResult:
         args = dict(request.arguments)
         extra: List[str] = []
-        for hook in self._hooks:
+        hooks = [*self._hooks, *(additional_hooks or ())]
+        for hook in hooks:
             if hook.event != "pre_tool_use":
                 continue
             ctx = HookContext("pre_tool_use", request, dict(args))
@@ -130,12 +137,16 @@ class ToolExecutor:
         except TimeoutError:
             error = "tool timed out after %.1f seconds" % self.timeout_seconds
             output = "Error: %s" % error
-            await self._run_error_hooks(request, args, error, extra, output=output)
+            await self._run_error_hooks(
+                request, args, error, extra, output=output, hooks=hooks
+            )
             return ToolExecutionResult("error", output, args, extra)
         except Exception as exc:
             error = str(exc)
             output = "工具执行出错: %s" % error
-            await self._run_error_hooks(request, args, error, extra, output=output)
+            await self._run_error_hooks(
+                request, args, error, extra, output=output, hooks=hooks
+            )
             return ToolExecutionResult("error", output, args, extra)
         attention: Optional[str] = None
         if isinstance(invoked, ToolResult):
@@ -143,14 +154,14 @@ class ToolExecutor:
             attention = invoked.mobile_attention
             if invoked.is_error:
                 await self._run_error_hooks(
-                    request, args, output, extra, output=output
+                    request, args, output, extra, output=output, hooks=hooks
                 )
                 return ToolExecutionResult(
                     "error", output, args, extra, mobile_attention=attention
                 )
         else:
             output = str(invoked)
-        for hook in self._hooks:
+        for hook in hooks:
             if hook.event == "post_tool_use":
                 ctx = HookContext("post_tool_use", request, dict(args), result=output)
                 try:
@@ -172,8 +183,9 @@ class ToolExecutor:
         extra: List[str],
         *,
         output: str = "",
+        hooks: List[ToolHook] | None = None,
     ) -> None:
-        for hook in self._hooks:
+        for hook in hooks if hooks is not None else self._hooks:
             if hook.event != "post_tool_error":
                 continue
             ctx = HookContext(

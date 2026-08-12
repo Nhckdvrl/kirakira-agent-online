@@ -12,10 +12,28 @@ import json
 import os
 import re
 import shutil
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import yaml
+
+
+_cloud_skill_overlay: ContextVar[Dict[str, Dict[str, Any]]] = ContextVar(
+    "kirakira_cloud_skill_overlay", default={}
+)
+
+
+@contextmanager
+def bind_cloud_skills(records: Dict[str, Dict[str, Any]]):
+    """Bind one tenant's durable skill catalog to this async task only."""
+
+    token = _cloud_skill_overlay.set({str(key): dict(value) for key, value in records.items()})
+    try:
+        yield
+    finally:
+        _cloud_skill_overlay.reset(token)
 
 
 class SkillLoader:
@@ -47,23 +65,27 @@ class SkillLoader:
             }
 
     def names(self) -> List[str]:
-        return sorted(self._skills.keys())
+        return sorted(set(self._skills) | set(_cloud_skill_overlay.get()))
+
+    def _skill(self, name: str) -> Dict[str, Any] | None:
+        return _cloud_skill_overlay.get().get(name) or self._skills.get(name)
 
     def always_names(self) -> List[str]:
         """Return available skills whose frontmatter opts into every context frame."""
 
         return sorted(
             name
-            for name, skill in self._skills.items()
+            for name in self.names()
+            if (skill := self._skill(name)) is not None
             if skill.get("always") and skill.get("available", True)
         )
 
     def descriptions(self) -> str:
-        if not self._skills:
+        if not self.names():
             return "(no skills)"
         lines: List[str] = []
         for name in self.names():
-            skill = self._skills[name]
+            skill = self._skill(name) or {}
             line = " - %s: %s" % (name, skill.get("description", "-"))
             when = skill.get("when_to_use")
             if when:
@@ -74,7 +96,7 @@ class SkillLoader:
         return "\n".join(lines)
 
     def load(self, name: str) -> str:
-        skill = self._skills.get(name)
+        skill = self._skill(name)
         if skill is None:
             available = ", ".join(self.names()) or "(none)"
             return "Error: Unknown skill '%s'. Available: %s" % (name, available)

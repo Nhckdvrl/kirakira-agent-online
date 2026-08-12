@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import create_engine
 
 from agent.tools.execution_backend import ExecutionBackendDescriptor
@@ -36,7 +37,8 @@ class _IsolatedBackend:
 
 
 @pytest.mark.asyncio
-async def test_cloud_worker_composition_has_no_local_state_fallback(tmp_path) -> None:
+async def test_cloud_worker_composition_has_no_local_state_fallback(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KIRAKIRA_CREDENTIAL_KEY", Fernet.generate_key().decode())
     database_path = tmp_path / "cloud.db"
     sync_url = f"sqlite+pysqlite:///{database_path}"
     sync_engine = create_engine(sync_url)

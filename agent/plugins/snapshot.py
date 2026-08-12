@@ -346,7 +346,9 @@ class SnapshotToolView:
         allowed = unlocked or set()
         specs = self._base.visible_specs(allowed)
         specs.extend(
-            tool.spec for name, tool in self._overlay.items() if name in allowed
+            tool.spec
+            for name, tool in self._overlay.items()
+            if not tool.deferred or name in allowed
         )
         return specs
 
@@ -355,7 +357,7 @@ class SnapshotToolView:
 
     def is_deferred(self, name: str) -> bool:
         if name in self._overlay:
-            return True
+            return self._overlay[name].deferred
         return self._base.is_deferred(name)
 
     def has(self, name: str) -> bool:

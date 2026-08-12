@@ -13,14 +13,20 @@ MessageBus 和 host execution 源码只作为测试/算法回归 adapter，`kira
 - 原 ReAct、context、compaction、Default Memory、Proactive 和 Drift 算法的 Cloud composition。
 - PostgreSQL Memory/profile、pgvector candidate recall、工具 checkpoint、remote sandbox fail-closed 合同。
 - durable 主动 Agent conversation、外部事件 inbox、automation lease/heartbeat、幂等投递与被动优先 fencing。
-- systemd API/多 worker 部署单元，以及 SQLite 快速测试和真实 PostgreSQL 集成测试。
-- Neon main 已执行完整 Alembic `20260809_03 → 20260809_13` migration；临时验证分支已清理。
+- durable Scheduler（at/after/every/cron/timezone/misfire）、用户文件与多模态附件。
+- 浏览器产品界面，以及 Telegram、OneBot QQ、腾讯 QQBot 的配对、入站去重和 durable outbox。
+- 按用户隔离的远程 MCP、Cloud Plugin、Skill 和 durable 子 Agent；每轮 runtime snapshot/lease 保证一致性。
+- 独立 Bubblewrap sandbox 服务，覆盖 shell、PTY/stdin、文件、二进制内容、超时和 owner cleanup。
+- API、worker、sandbox、channel gateway 四个生产进程及 systemd units。
+- `661 passed, 1 skipped, 4 subtests passed`，wheel/sdist 构建、JavaScript 语法与 Alembic head 验证通过。
+- Neon main 已执行完整 Alembic `20260809_03 → 20260812_20` migration；临时验证分支已清理。
 
 ## 代码外的部署条件
 
-- 在目标环境部署满足能力证明合同的 isolated sandbox 服务。
+- 在目标 Linux 环境安装 Bubblewrap，并为 sandbox 配置独立主机/容器、磁盘配额和 cgroup 上限。
 - 配置 PostgreSQL、主模型和 1024 维 embedding endpoint 的 secret。
-- 安装 systemd units，并按目标模型延迟与配额执行容量压测。
+- 配置渠道/MCP/Plugin 所需凭据、域名/TLS、备份和数据保留策略。
+- 安装 systemd units，并按真实模型延迟、配额与目标并发执行容量压测。
 
 这些是目标运行环境和第三方服务的接入工作，不是 Local fallback：缺少 PostgreSQL、模型、1024 维
 embedding 或隔离 sandbox 时，Cloud worker 会拒绝启动，不会静默降级算法或在宿主机执行工具。

@@ -121,6 +121,329 @@ class AgentAutomation(Base):
     )
 
 
+class ScheduledJob(Base):
+    """Tenant-scoped durable equivalent of the original JSON SchedulerService."""
+
+    __tablename__ = "scheduled_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'cancelled', 'failed', 'missed')",
+            name="ck_scheduled_jobs_status",
+        ),
+        CheckConstraint("tier IN ('instant', 'soft')", name="ck_scheduled_jobs_tier"),
+        CheckConstraint(
+            "trigger IN ('at', 'after', 'every')", name="ck_scheduled_jobs_trigger"
+        ),
+        Index("ix_scheduled_jobs_due", "status", "run_at"),
+        Index("ix_scheduled_jobs_user_status", "user_id", "status", "run_at"),
+        Index("ix_scheduled_jobs_lease", "lease_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    remaining_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    tier: Mapped[str] = mapped_column(String(16), nullable=False, default="instant")
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False, default="at")
+    cron_expr: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    timezone: Mapped[str] = mapped_column(String(100), nullable=False, default="UTC")
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fire_token: Mapped[str | None] = mapped_column(String(64))
+    last_error: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class UserFile(Base):
+    """Metadata authority for bytes stored in the isolated tenant workspace."""
+
+    __tablename__ = "user_files"
+    __table_args__ = (
+        Index("ix_user_files_user_created", "user_id", "created_at"),
+        Index("ix_user_files_conversation_created", "conversation_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    filename: Mapped[str] = mapped_column(String(300), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(200), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class ChannelPairing(Base):
+    __tablename__ = "channel_pairings"
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('telegram', 'qq', 'qqbot')", name="ck_channel_pairings_provider"
+        ),
+        Index("ix_channel_pairings_expiry", "expires_at"),
+    )
+
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class ChannelLink(Base):
+    __tablename__ = "channel_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "external_chat_id", name="uq_channel_links_provider_chat"
+        ),
+        Index("ix_channel_links_conversation", "conversation_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_user_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    external_chat_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class ChannelInboundEvent(Base):
+    __tablename__ = "channel_inbound_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "external_event_id", name="uq_channel_inbound_event"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_event_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    link_id: Mapped[UUID] = mapped_column(
+        ForeignKey("channel_links.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
+class ChannelDelivery(Base):
+    __tablename__ = "channel_deliveries"
+    __table_args__ = (
+        UniqueConstraint("link_id", "message_id", name="uq_channel_delivery_message"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'sent', 'failed')",
+            name="ck_channel_deliveries_status",
+        ),
+        Index("ix_channel_deliveries_claim", "status", "created_at"),
+        Index("ix_channel_deliveries_lease", "lease_expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    link_id: Mapped[UUID] = mapped_column(
+        ForeignKey("channel_links.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[UUID] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CloudMcpServer(Base):
+    """Per-user remote MCP declaration; credentials are envelope-encrypted."""
+
+    __tablename__ = "cloud_mcp_servers"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_cloud_mcp_server_user_name"),
+        Index("ix_cloud_mcp_servers_user_enabled", "user_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    encrypted_headers: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class CloudPlugin(Base):
+    """Tenant-owned remote plugin service and its validated capability manifest."""
+
+    __tablename__ = "cloud_plugins"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_cloud_plugins_user_name"),
+        Index("ix_cloud_plugins_user_enabled", "user_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    encrypted_headers: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    manifest: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class CloudPluginTask(Base):
+    """Durable timer for plugin jobs and Proactive source polling."""
+
+    __tablename__ = "cloud_plugin_tasks"
+    __table_args__ = (
+        UniqueConstraint("plugin_id", "task_id", "kind", name="uq_cloud_plugin_task"),
+        CheckConstraint("kind IN ('job', 'source')", name="ck_cloud_plugin_tasks_kind"),
+        Index("ix_cloud_plugin_tasks_due", "enabled", "next_run_at"),
+        Index("ix_cloud_plugin_tasks_lease", "lease_expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    plugin_id: Mapped[UUID] = mapped_column(
+        ForeignKey("cloud_plugins.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class CloudSubagentJob(Base):
+    """Durable child-agent task owned by a user and parent conversation."""
+
+    __tablename__ = "cloud_subagent_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed', 'cancelled')",
+            name="ck_cloud_subagent_jobs_status",
+        ),
+        Index("ix_cloud_subagent_jobs_claim", "status", "created_at"),
+        Index("ix_cloud_subagent_jobs_user_status", "user_id", "status"),
+        Index("ix_cloud_subagent_jobs_lease", "lease_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    task: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    profile: Mapped[str] = mapped_column(String(32), nullable=False, default="research")
+    max_iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    result: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    result_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    lease_owner: Mapped[str | None] = mapped_column(String(200))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CloudSkill(Base):
+    __tablename__ = "cloud_skills"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_cloud_skills_user_name"),
+        Index("ix_cloud_skills_user_enabled", "user_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), nullable=False, default="-")
+    when_to_use: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    always: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class AutomationInboxEvent(Base):
     """External event waiting to be fetched by the canonical Proactive source stage."""
 

@@ -72,9 +72,15 @@ class CloudWorker:
                 principal=AgentPrincipal(
                     str(user.id), kind="user", display_name=user.email
                 ),
-                origin=TurnOrigin("api", "cloud", str(run.id)),
+                origin=TurnOrigin(
+                    "scheduler" if input_message.agent_metadata.get("scheduled_job_id") else "api",
+                    "cloud-scheduler" if input_message.agent_metadata.get("scheduled_job_id") else "cloud",
+                    str(run.id),
+                ),
                 memory_scope=TurnMemoryScope("user", str(user.id)),
+                media=tuple(input_message.agent_metadata.get("media") or ()),
                 metadata={
+                    **dict(input_message.agent_metadata or {}),
                     "run_id": str(run.id),
                     CLOUD_TRANSCRIPT_KEY: {
                         "created_at": conversation.created_at.isoformat(),

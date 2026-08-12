@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.16,<2",
     "argon2-cffi>=23.1,<26",
+    "cryptography>=45,<48",
     "fastapi>=0.116,<1",
     "httpx[socks]>=0.28.0",
     "html2text>=2025.4.0",
@@ -31,6 +32,8 @@ keywords = ["agent", "cloud", "multi-user", "tool-calling"]
 [project.scripts]
 kirakira-cloud-api = "cloud.main:main"
 kirakira-cloud-worker = "cloud.worker_main:main"
+kirakira-sandbox = "sandbox_service.main:main"
+kirakira-channel-gateway = "cloud.channel_main:main"
 
 [dependency-groups]
 dev = [
@@ -56,13 +59,14 @@ include = [
     "memory2*",
     "plugins*",
     "proactive_v2*",
+    "sandbox_service*",
     "session*",
     "utils*",
 ]
 exclude = ["agent.migrations*", "infra.channels*"]
 
 [tool.setuptools.package-data]
-"cloud" = ["migrations/script.py.mako"]
+"cloud" = ["migrations/script.py.mako", "static/*"]
 "plugins.drift_flow" = ["builtin_skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
